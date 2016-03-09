@@ -270,7 +270,8 @@ class IcarusTree_API_Endpoint {
      * @return void
      */
     public function icarus_rewrite_rule() {
-        add_rewrite_rule('^icarus/api/([A-Za-z0-9]+)', 'index.php?icarustreeapi=1&endpoint=$1', 'top');
+        add_rewrite_rule('^icarus/api/?([A-Za-z0-9]+)', 
+                'index.php?icarustreeapi=1&endpoint=$matches[1]', 'top');
         flush_rewrite_rules();
     }
 
@@ -294,6 +295,7 @@ class IcarusTree_API_Endpoint {
             }
 
             $endpoint = $wp->query_vars["endpoint"];
+
             switch ($endpoint) {
                 case "login": $this->login();
                     break;
