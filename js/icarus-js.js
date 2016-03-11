@@ -10,7 +10,7 @@ function generateKey(element){
     var chars = 'abcdefghijklmnopqrstuvwxyz';
     chars += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     chars += '0123456789';
-    chars += '~`!@#$%^&*()_+-={}[]:";\'<>?,./|\\';
+    chars += '~!@$%^&*()_+-={}[]:;\<>?,./|\\';
     
     var result = '';
     for (var i = length; i > 0; --i) {
