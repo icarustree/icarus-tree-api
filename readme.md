@@ -16,7 +16,7 @@ This returns a token when valid credentials for a user is submitted with JSON.
 **POST**
 
     {
-        "api_key": YOUR KEY,
+        "api_key": YOUR_KEY,
         "username": "JoeBloggs",
         "password": "test1234"
     }
@@ -43,7 +43,7 @@ This registers a user on the site.
 **POST**
 
     {
-        "api_key": YOUR KEY,
+        "api_key": YOUR_KEY,
         "username": "JoeBloggs",
         "password": "test1234",
         "email": "joe@notrealemail.com"
@@ -52,16 +52,7 @@ This registers a user on the site.
 **RESPONSE**
 
     {
-        "ID": 1,
-        "user_login": "joebloggs",
-        "user_nicename": "joebloggs",
-        "user_email": "joe@notrealemail.com",
-        "user_url": "",
-        "user_role": "",
-        "user_registered": "2016-02-29 23:24:56",
-        "display_name": "Joe",
-        "token": "109cc9bdabbb562f0cff",
-        "session": "2016-03-09 21:12:40"
+        user_id: NEW_ID
     }
 
 ## Post

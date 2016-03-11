@@ -463,7 +463,7 @@ class IcarusTree_API_Endpoint {
         if (!$user_id and email_exists($user_email) == false) {
             
             $user_id = wp_create_user($json["username"],$user_pwd,$user_email);
-            $response = array("ID" => $user_id);
+            $response = array("user_id" => $user_id);
             $this->send($response);
             
         } else {
