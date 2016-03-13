@@ -32,7 +32,7 @@ class IcarusTree_API_Endpoint {
      * Endpoints that require a user token and user ID.
      * @var array 
      */
-    protected $secure_endpoints = array("post");
+    protected $secure_endpoints = array("logout","post");
 
     /**
      * Hook WordPress
@@ -42,8 +42,6 @@ class IcarusTree_API_Endpoint {
 
         // Add rewrite rule to htaccess
         add_action('init', array($this, 'icarus_rewrite_rule'), 0);
-
-        add_action('admin_enqueue_scripts', array($this, 'enqueue_scripts'), 0);
         
         // Load custom settings
         add_action('init', array($this,'load_settings'));
@@ -56,12 +54,362 @@ class IcarusTree_API_Endpoint {
 
         // Admin actions
         if (is_admin()) {
+            add_action('admin_enqueue_scripts', array($this, 'enqueue_scripts'), 0);
             add_action('admin_init', array($this, "register_settings"));
             add_action('admin_menu', array($this, "admin_menu"));
         }
         
         // Activation & Deactivation
         register_activation_hook(__FILE__,array($this,'activate'));
+    }
+    
+    /**
+     * Serves up the relevant function for each endpoint.
+     * 
+     * @global type $wp
+     * @return void
+     */
+    public function handle_requests() {
+        
+        // If valid path for API
+        global $wp;
+        if (isset($wp->query_vars["icarustreeapi"]) &&
+            isset($wp->query_vars["endpoint"])) {
+            
+            // Get JSON
+            $input = file_get_contents('php://input');
+            $json = $this->object_to_array(json_decode($input));
+            
+            // Check for API Key
+            if (isset($json["api_key"])) {
+                
+                // Check API Key Valid
+                if ($json["api_key"] == $this->api_key) {
+                    
+                    // Remove API key from JSON
+                    unset($json["api_key"]);
+                    
+                    // Get endpoint
+                    $endpoint = $wp->query_vars["endpoint"];
+                    
+                    // Check if endpoint requires token & user ID
+                    if (in_array($endpoint,$this->secure_endpoints)) {
+                        
+                        // Check for token and user ID
+                        if (isset($json["token"]) && isset($json["user_id"])) {
+                            
+                            $userid = $json["user_id"];
+                            $token = $json["token"];
+                            
+                            if ($this->check_token($userid, $token)) {
+                                
+                                unset($json["user_id"]);
+                                unset($json["token"]);
+                                
+                            }
+                            
+                        } else {
+                            
+                            $this->error("This endpoint requires a token and user ID.");
+                            
+                        }
+                        
+                    }
+                    
+                    // Endpoint switch
+                    switch($endpoint) {
+                        case "login": $this->login($json); break;
+                        case "logout": $this->logout($userid); break;
+                        case "register": $this->register($json); break;
+                        case "post": $this->post($json,$userid); break;
+                        default: $this->error("Not valid endpoint!"); break;
+                    }
+                    
+                } else {
+                    
+                    $this->error("API key is invalid!");
+                    
+                }
+                
+            } else {
+                
+                $this->error("API key not in request!");
+                
+            }
+            
+        }
+        
+    }
+
+    /**
+     * Checks a user's login credentials, and sends token if user exists.
+     * 
+     * @param array $input The JSON array.
+     * 
+     * @return void
+     */
+    protected function login($input) {
+        
+        // Required JSON
+        $req = array(
+            "username"      =>  "",
+            "password"      =>  ""
+        );
+        $json = $this->json_req($input,$req);
+        
+        // Authenticate user
+        $user = $json["username"];
+        $pass = $json["password"];
+        $userobj = wp_authenticate($user, $pass);
+        
+        // Login Credentials wrong
+        if (is_wp_error($userobj)) {
+            
+            $this->error("Invalid login credentials!");  
+            
+        } else {
+            
+            // Generate token
+            $token = bin2hex(random_bytes($this->token_length));
+            $date = date("Y-m-d H:i:s");
+            
+            // Put token and session date in database
+            update_user_meta($userobj->ID, 'icarus_token', $token, false);
+            update_user_meta($userobj->ID, 'icarus_session', $date, false);
+            $userobj->token = $token;
+            $userobj->session = $date;
+            
+            // Remove uneccesary values
+            unset($userobj->data->user_pass);
+            unset($userobj->data->user_activation_key);
+            unset($userobj->data->user_status);
+            
+            // Print results
+            $this->send($userobj->data);
+            
+        }
+                
+    }
+    
+    /**
+     * Logs out a user, removing their token and session date.
+     * 
+     * @param int $userid The user ID to log out.
+     */
+    protected function logout($userid) {
+        
+        delete_user_meta($userid,"icarus_token");
+        delete_user_meta($userid,"icarus_session");
+        $this->send("Logged out successfully.");
+        
+    }
+    
+    /**
+     * Registers a new user on the site.
+     * 
+     * @param array $input The JSON array.
+     * 
+     * @return void
+     */
+    protected function register($input) {
+        
+        // Required JSON
+        $req = array(
+            "username"      =>  "",
+            "password"      =>  "",
+            "email"         =>  FILTER_VALIDATE_EMAIL
+        );
+        $json = $this->json_req($input,$req);
+        
+        // Get credentials
+        $user_id = username_exists($json["username"]);
+        $user_pwd = $json["password"];
+        $user_email = $json["email"];
+        
+        // Check user does not exist already
+        if (!$user_id and email_exists($user_email) == false) {
+            
+            $user_id = wp_create_user($json["username"],$user_pwd,$user_email);
+            $response = array("user_id" => $user_id);
+            $this->send($response);
+            
+        } else {
+            
+            $this->error("User already exists!");  
+            
+        }
+        
+    }
+    
+    /**
+     * Insert a post on the blog.
+     * 
+     * @param array $input The JSON array.
+     * @param int $userid The user/author ID.
+     * 
+     * @return void
+     */
+    protected function post($input,$userid) {
+        
+        // Required JSON
+        $req = array(
+            "post_title"        =>  "",
+            "post_content"      =>  ""
+        );
+        
+        // Optional JSON
+        $opt = array (
+            "post_content_filtered"     => "",
+            "post_excerpt"              => "",
+            "post_status"               => "",
+            "post_type"                 => "",
+            "post_date"                 => "",
+            "post_password"             => "",
+            "post_name"                 => "",
+            "post_parent"               => FILTER_VALIDATE_INT,
+            "menu_order"                => FILTER_VALIDATE_INT,
+            "tax_input"                 => FILTER_REQUIRE_ARRAY,
+            "meta_input"                => FILTER_REQUIRE_ARRAY
+        );
+        
+        $json = $this->json_req($input,$req,$opt);
+        
+        // Set user ID
+        $json["post_author"] = $userid;
+        $user = get_userdata($userid);
+        $role = $user->roles;
+        
+        // Can post?
+        if ($role[0] == "subscriber") {
+            $this->error("You do not have the correct permissions to post!");
+        }
+        
+        // Can publish?
+        if ($role[0] == "contributor") {
+            unset($json["post_status"]);
+        }
+        
+        // Insert post
+        $post = wp_insert_post($json);
+        
+        // Response
+        if ($post) {
+            
+            $response = array("post_id" => $post);
+            $this->send($response);
+            
+        } else {
+            
+            $this->error("Could not insert post!");
+            
+        }
+        
+    }
+    
+    /**
+     * Check submitted JSON for required and optional parameters.
+     * 
+     * @param array $input JSON to check.
+     * @param array $req An array of required parameters and filter type.
+     * @param array $opt An array of optional parameters and filter type.
+     * 
+     * @return array
+     */
+    protected function json_req($input,$req,$opt = array()) {
+        
+        // Check for required values
+        foreach($req as $rk => $rv) {
+            if (!isset($input[$rk])) {
+                $this->error($rk . " is required!");
+            }
+        }
+        
+        // For each JSON value
+        foreach($input as $k => $v) {
+            
+            // If required value set
+            if (isset($req[$k])) {
+                
+                // If not blank
+                if ($v != "") {
+                    
+                    // Check filter / validation type
+                    if ($req[$k] != "") {
+                        
+                        if ((is_array($v) && $opt[$k] !== FILTER_REQUIRE_ARRAY) ||
+                           (!is_array($v) && filter_var($v,$req[$k]) === false)) {
+
+                            $this->error($k . " is invalid!");
+
+                        }
+                    }
+                    
+                } else {
+                    
+                    $this->error($k . " cannot be blank!");
+                    
+                }
+                
+            } else 
+            
+            // If value accepted as optional
+            if (isset($opt[$k])) {
+                
+                // If not blank
+                if ($v != "") {
+                    
+                    // Check filter / validation type
+                    if ($opt[$k] != "") {
+                        
+                        if ((is_array($v) && $opt[$k] !== FILTER_REQUIRE_ARRAY) ||
+                           (!is_array($v) && filter_var($v,$opt[$k]) === false)) {
+
+                            $this->error($k . " is invalid!");
+
+                        }
+                        
+                    }
+                    
+                } else {
+                    unset($input[$k]); 
+                }
+                
+            } else {
+                unset($input[$k]);  
+            }
+            
+        }
+        
+        // Return JSON
+        return $input;
+        
+    }
+
+    /**
+     * Displays a JSON error string.
+     * 
+     * @param string $code
+     * @return void
+     */
+    protected function error($code) {
+
+        $error = Array();
+        $error["error"] = $code;
+        $json = json_encode($error);
+        print_r($json);
+        exit;
+    }
+
+    /**
+     * Print array as JSON string.
+     * 
+     * @param array $array
+     * @return void
+     */
+    protected function send($array) {
+        $json = json_encode($array);
+        print_r($json);
+        exit;
     }
     
     /**
@@ -312,340 +660,6 @@ class IcarusTree_API_Endpoint {
     }
 
     /**
-     * Serves up the relevant function for each endpoint.
-     * 
-     * @global type $wp
-     * @return void
-     */
-    public function handle_requests() {
-        
-        // If valid path for API
-        global $wp;
-        if (isset($wp->query_vars["icarustreeapi"]) &&
-            isset($wp->query_vars["endpoint"])) {
-            
-            // Get JSON
-            $input = file_get_contents('php://input');
-            $json = $this->object_to_array(json_decode($input));
-            
-            // Check for API Key
-            if (isset($json["api_key"])) {
-                
-                // Check API Key Valid
-                if ($json["api_key"] == $this->api_key) {
-                    
-                    // Remove API key from JSON
-                    unset($json["api_key"]);
-                    
-                    // Get endpoint
-                    $endpoint = $wp->query_vars["endpoint"];
-                    
-                    // Check if endpoint requires token & user ID
-                    if (in_array($endpoint,$this->secure_endpoints)) {
-                        
-                        // Check for token and user ID
-                        if (isset($json["token"]) && isset($json["user_id"])) {
-                            
-                            $userid = $json["user_id"];
-                            $token = $json["token"];
-                            
-                            if ($this->check_token($userid, $token)) {
-                                
-                                unset($json["user_id"]);
-                                unset($json["token"]);
-                                
-                            }
-                            
-                        } else {
-                            
-                            $this->error("This endpoint requires a token and user ID.");
-                            
-                        }
-                        
-                    }
-                    
-                    // Endpoint switch
-                    switch($endpoint) {
-                        case "login": $this->login($json); break;
-                        case "post": $this->post($json,$userid); break;
-                        default: $this->error("Not valid endpoint!"); break;
-                    }
-                    
-                } else {
-                    
-                    $this->error("API key is invalid!");
-                    
-                }
-                
-            } else {
-                
-                $this->error("API key not in request!");
-                
-            }
-            
-        }
-        
-    }
-
-    /**
-     * Checks a user's login credentials, and sends token if user exists.
-     * 
-     * @param array $input The JSON array.
-     * 
-     * @return void
-     */
-    protected function login($input) {
-        
-        // Required JSON
-        $req = array(
-            "username"      =>  "",
-            "password"      =>  ""
-        );
-        $json = $this->json_req($input,$req);
-        
-        // Authenticate user
-        $user = $json["username"];
-        $pass = $json["password"];
-        $userobj = wp_authenticate($user, $pass);
-        
-        // Login Credentials wrong
-        if (is_wp_error($userobj)) {
-            
-            $this->error("Invalid login credentials!");  
-            
-        } else {
-            
-            // Generate token
-            $token = bin2hex(random_bytes($this->token_length));
-            $date = date("Y-m-d H:i:s");
-            
-            // Put token and session date in database
-            update_user_meta($userobj->ID, 'icarus_token', $token, false);
-            update_user_meta($userobj->ID, 'icarus_session', $date, false);
-            $userobj->token = $token;
-            $userobj->session = $date;
-            
-            // Remove uneccesary values
-            unset($userobj->data->user_pass);
-            unset($userobj->data->user_activation_key);
-            unset($userobj->data->user_status);
-            
-            // Print results
-            $this->send($userobj->data);
-            
-        }
-                
-    }
-    
-    /**
-     * Registers a new user on the site.
-     * 
-     * @param array $input The JSON array.
-     * 
-     * @return void
-     */
-    protected function register($input) {
-        
-        // Required JSON
-        $req = array(
-            "username"      =>  "",
-            "password"      =>  "",
-            "email"         =>  FILTER_VALIDATE_EMAIL
-        );
-        $json = $this->json_req($input,$req);
-        
-        // Get credentials
-        $user_id = username_exists($json["username"]);
-        $user_pwd = $json["password"];
-        $user_email = $json["email"];
-        
-        // Check user does not exist already
-        if (!$user_id and email_exists($user_email) == false) {
-            
-            $user_id = wp_create_user($json["username"],$user_pwd,$user_email);
-            $response = array("user_id" => $user_id);
-            $this->send($response);
-            
-        } else {
-            
-            $this->error("User already exists!");  
-            
-        }
-        
-    }
-    
-    /**
-     * Insert a post on the blog.
-     * 
-     * @param array $input The JSON array.
-     * @param int $userid The user/author ID.
-     * 
-     * @return void
-     */
-    protected function post($input,$userid) {
-        
-        // Required JSON
-        $req = array(
-            "post_title"        =>  "",
-            "post_content"      =>  ""
-        );
-        
-        // Optional JSON
-        $opt = array (
-            "post_content_filtered"     => "",
-            "post_excerpt"              => "",
-            "post_status"               => "",
-            "post_type"                 => "",
-            "post_date"                 => "",
-            "post_password"             => "",
-            "post_name"                 => "",
-            "post_parent"               => FILTER_VALIDATE_INT,
-            "menu_order"                => FILTER_VALIDATE_INT,
-            "tax_input"                 => FILTER_REQUIRE_ARRAY,
-            "meta_input"                => FILTER_REQUIRE_ARRAY
-        );
-        
-        $json = $this->json_req($input,$req,$opt);
-        
-        // Set user ID
-        $json["post_author"] = $userid;
-        $user = get_userdata($userid);
-        $role = $user->roles;
-        
-        // Can post?
-        if ($role[0] == "subscriber") {
-            $this->error("You do not have the correct permissions to post!");
-        }
-        
-        // Can publish?
-        if ($role[0] == "contributor") {
-            unset($json["post_status"]);
-        }
-        
-        // Insert post
-        $post = wp_insert_post($json);
-        
-        // Response
-        if ($post) {
-            
-            $response = array("post_id" => $post);
-            $this->send($response);
-            
-        } else {
-            
-            $this->error("Could not insert post!");
-            
-        }
-        
-    }
-    
-    /**
-     * Check submitted JSON for required and optional parameters.
-     * 
-     * @param array $input JSON to check.
-     * @param array $req An array of required parameters and filter type.
-     * @param array $opt An array of optional parameters and filter type.
-     * 
-     * @return array
-     */
-    protected function json_req($input,$req,$opt = array()) {
-        
-        // Check for required values
-        foreach($req as $rk => $rv) {
-            if (!isset($input[$rk])) {
-                $this->error($rk . " is required!");
-            }
-        }
-        
-        // For each JSON value
-        foreach($input as $k => $v) {
-            
-            // If required value set
-            if (isset($req[$k])) {
-                
-                // If not blank
-                if ($v != "") {
-                    
-                    // Check filter / validation type
-                    if ($req[$k] != "") {
-                        
-                        if ((is_array($v) && $opt[$k] !== FILTER_REQUIRE_ARRAY) ||
-                           (!is_array($v) && filter_var($v,$opt[$k]) === false)) {
-
-                            $this->error($k . " is invalid!");
-
-                        }
-                    }
-                    
-                } else {
-                    
-                    $this->error($k . " cannot be blank!");
-                    
-                }
-                
-            } else 
-            
-            // If value accepted as optional
-            if (isset($opt[$k])) {
-                
-                // If not blank
-                if ($v != "") {
-                    
-                    // Check filter / validation type
-                    if ($opt[$k] != "") {
-                        
-                        if ((is_array($v) && $opt[$k] !== FILTER_REQUIRE_ARRAY) ||
-                           (!is_array($v) && filter_var($v,$opt[$k]) === false)) {
-
-                            $this->error($k . " is invalid!");
-
-                        }
-                        
-                    }
-                    
-                } else {
-                    unset($input[$k]); 
-                }
-                
-            } else {
-                unset($input[$k]);  
-            }
-            
-        }
-        
-        // Return JSON
-        return $input;
-        
-    }
-
-    /**
-     * Displays a JSON error string.
-     * 
-     * @param string $code
-     * @return void
-     */
-    protected function error($code) {
-
-        $error = Array();
-        $error["error"] = $code;
-        $json = json_encode($error);
-        print_r($json);
-        exit;
-    }
-
-    /**
-     * Print array as JSON string.
-     * 
-     * @param array $array
-     * @return void
-     */
-    protected function send($array) {
-        $json = json_encode($array);
-        print_r($json);
-        exit;
-    }
-
-    /**
      * This checks if a access token matches the one in a user's meta 
      * information, and if it hasn't expired.
      * 
@@ -662,6 +676,7 @@ class IcarusTree_API_Endpoint {
             if ($interval < $this->session_timeout) {
                 return true;
             } else {
+                $this->logout($id);
                 $this->error("Your session has timed out. You must log in again.");
                 exit;
             }
